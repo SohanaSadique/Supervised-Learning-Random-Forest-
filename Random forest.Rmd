@@ -1,0 +1,769 @@
+---
+title: "Supervised Learning Assignment: Random Forest"
+author: "Sohana Sadique"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidymodels)
+library(sjPlot)
+library(C50)
+library(ranger)
+library(finalfit)
+library(knitr)
+library(gtsummary)
+library(mlbench)
+library(vip)
+library(rsample)
+library(rpart.plot)
+library(tune)
+library(recipes)
+library(yardstick)
+library(parsnip)
+library(glmnet)
+library(themis)
+library(microbenchmark)
+library(corrr)
+library(tableone)
+
+```
+
+## Loading the dataset 
+
+For this assignmnet I am using the CanPath imputed dataset. 
+
+```{r}
+data <-read_csv("C:/Users/Sohana/OneDrive - University of Saskatchewan/ML 898/data/canpath_imputed.csv")
+```
+
+
+## Inspecting the structure of the  dataset
+
+```{r}
+#str(data)
+#skimr::skim(data)
+```
+
+*Interpretation:* The dataset has 41,187 observations and 93 variables. There are no missing values in the dataset. The variables are a mix of numeric and factor variables. The first two variables, `ID` and `ADM_STUDY_ID`, are likely identifiers for the participants and can be removed from the dataset as they do not provide any predictive value for the outcome variable.
+
+
+## Research Question for this assignmnet
+
+**Can we develop a model that will predict whether a participant has ever had depression?**
+
+
+## Conversion to factors and selecting variables
+
+Here I am organizing data to run our models. 
+
+```{r}
+
+data <- data %>%
+  mutate(across(c(3,5:6,8:12,15:81,83:91), as.factor))
+
+data$ID <- NULL
+data$ADM_STUDY_ID <- NULL
+
+```
+
+## Checking the structure of the dataset again to confirm that all variables are coded to their accurate types.
+
+```{r}
+#str(data)
+```
+
+
+## Selecting and recoding variables
+
+Based on my research question my outcome variables is : *DIS_DEP_EVER*: Occurrence of major depression at any point during the life of the participant.
+
+Predictors : *SDC_AGE_CALC, SDC_GENDER, SDC_MARITAL_STATUS, SDC_EDU_LEVEL, SDC_INCOME, SDC_HOUSEHOLD_ADULTS_NB, SDC_HOUSEHOLD_CHILDREN_NB, DIS_DIAB_EVER, PA_TOTAL_SHORT, PM_BMI_SR, ALC_EVER, SMK_CIG_EVER, HS_GEN_HEALTH, WRK_EMPLOYMENT, DIS_DEP_FAM_EVER, DIS_MH_ANXIETY_EVER*
+
+## Simplifying the data
+
+Here I am simplifying the data because the random forest model can be computationally expensive, and I want to make sure that the model runs in a reasonable amount of time. I will select only the variables that are relevant to my research question and that I think will be good predictors of the outcome variable.
+
+```{r}
+data_small <- select(data, DIS_DEP_EVER, SDC_AGE_CALC, SDC_GENDER, SDC_MARITAL_STATUS, SDC_EDU_LEVEL, SDC_INCOME, SDC_HOUSEHOLD_ADULTS_NB, SDC_HOUSEHOLD_CHILDREN_NB, DIS_DIAB_EVER, PA_TOTAL_SHORT, PM_BMI_SR, ALC_EVER, SMK_CIG_EVER, HS_GEN_HEALTH, WRK_EMPLOYMENT, DIS_DEP_FAM_EVER, DIS_MH_ANXIETY_EVER)
+```
+
+
+## Preparing dataset 
+
+### Depression 
+
+```{r}
+table(data_small$DIS_DEP_EVER)
+
+data_small <- data_small %>%
+	mutate(depression = case_when(
+		DIS_DEP_EVER == 0 ~ "No",
+		DIS_DEP_EVER == 1 ~ "Yes",
+		DIS_DEP_EVER == 2 ~ "No"))
+
+table(data_small$DIS_DEP_EVER, data_small$depression)
+
+data_small$DIS_DEP_EVER <- NULL
+
+```
+
+### Gender
+
+```{r}
+table(data_small$SDC_GENDER)
+
+data_small <- data_small %>%
+	mutate(gender = case_when(
+		SDC_GENDER == 1 ~ "Male",
+		SDC_GENDER == 2 ~ "Female"))
+
+table(data_small$SDC_GENDER, data_small$gender)
+
+data_small$SDC_GENDER <- NULL
+
+```
+
+### Marital Status
+
+```{r}
+
+table(data_small$SDC_MARITAL_STATUS)
+
+data_small <- data_small %>% 
+            mutate(marital_recode = case_when(
+                                SDC_MARITAL_STATUS == 1 ~ "1_Married and/or living with a partner",
+                                SDC_MARITAL_STATUS == 2 ~ "2_Divorced",
+                                SDC_MARITAL_STATUS == 3 ~ "3_Widowed",
+                                SDC_MARITAL_STATUS == 4 ~ "4_Separated",
+                                SDC_MARITAL_STATUS == 5 ~ "5_Single, never married"
+            ))
+
+table(data_small$SDC_MARITAL_STATUS, data_small$marital_recode)
+
+data_small$SDC_MARITAL_STATUS <- NULL
+
+```
+### Education 
+
+```{r}
+table(data_small$SDC_EDU_LEVEL)
+
+data_small <- data_small %>%
+	mutate(edu_recode = case_when(
+		SDC_EDU_LEVEL == 0 ~ "1_None",
+		SDC_EDU_LEVEL == 1 ~ "2_Elementary School",
+		SDC_EDU_LEVEL == 2 ~ "3_High School",
+		SDC_EDU_LEVEL == 3 ~ "4_Trade, technical or vocational school",
+		SDC_EDU_LEVEL == 4 ~ "5_Community college, CEGEP or non-university certificate",
+		SDC_EDU_LEVEL == 5 ~ "6_University certificate below bachelor's level",
+		SDC_EDU_LEVEL == 6 ~ "7_Bachelor's degree",
+		SDC_EDU_LEVEL == 7 ~ "8_Graduate degree"))
+
+table(data_small$SDC_EDU_LEVEL, data_small$edu_recode)
+
+data_small$SDC_EDU_LEVEL <- NULL
+
+```
+### Income
+
+```{r}
+table(data_small$SDC_INCOME)
+
+data_small <- data_small %>%
+	mutate(income = case_when(
+		SDC_INCOME == 1 ~ "1_<$50,000",
+		SDC_INCOME == 2 ~ "1_<$50,000",
+		SDC_INCOME == 3 ~ "1_<$50,000",
+		SDC_INCOME == 4 ~ "2_$50,000 to $74,999",
+		SDC_INCOME == 5 ~ "3_$75,000 to $99,999",
+		SDC_INCOME == 6 ~ "4_$100,000 to $149,999",
+		SDC_INCOME == 7 ~ "5_>150,000",
+		SDC_INCOME == 8 ~ "5_>150,000"))
+
+table(data_small$SDC_INCOME, data_small$income)
+
+data_small$SDC_INCOME <- NULL
+
+```
+### Household Adults
+
+```{r}
+table(data_small$SDC_HOUSEHOLD_ADULTS_NB)
+
+data_small <- data_small %>%
+	mutate(hh_adults = case_when(
+		SDC_HOUSEHOLD_ADULTS_NB == 0 ~ "0",
+		SDC_HOUSEHOLD_ADULTS_NB == 1 ~ "1",
+		SDC_HOUSEHOLD_ADULTS_NB == 2 ~ "2",
+		SDC_HOUSEHOLD_ADULTS_NB == 3 ~ "3",
+		SDC_HOUSEHOLD_ADULTS_NB == 4 ~ "4+"))
+
+table(data_small$SDC_HOUSEHOLD_ADULTS_NB, data_small$hh_adults)
+
+data_small$SDC_HOUSEHOLD_ADULTS_NB <- NULL
+
+```
+### Household Children
+
+```{r}
+table(data_small$SDC_HOUSEHOLD_CHILDREN_NB)
+
+data_small <- data_small %>%
+	mutate(hh_children = case_when(
+		SDC_HOUSEHOLD_CHILDREN_NB == 0 ~ "0",
+		SDC_HOUSEHOLD_CHILDREN_NB == 1 ~ "1",
+		SDC_HOUSEHOLD_CHILDREN_NB == 2 ~ "2",
+		SDC_HOUSEHOLD_CHILDREN_NB == 3 ~ "3+"))
+
+table(data_small$SDC_HOUSEHOLD_CHILDREN_NB, data_small$hh_children)
+
+data_small$SDC_HOUSEHOLD_CHILDREN_NB <- NULL
+
+```
+### Diabetes
+
+```{r}
+table(data_small$DIS_DIAB_EVER)
+
+data_small <- data_small %>%
+	mutate(diabetes = case_when(
+		DIS_DIAB_EVER == 0 ~ "No",
+		DIS_DIAB_EVER == 1 ~ "Yes",
+		DIS_DIAB_EVER == 2 ~ "No"))
+
+table(data_small$DIS_DIAB_EVER, data_small$diabetes)
+
+data_small$DIS_DIAB_EVER <- NULL
+
+
+```
+
+### Alcohol
+
+```{r}
+table(data_small$ALC_EVER)
+
+data_small <- data_small %>%
+	mutate(alcohol = case_when(
+		ALC_EVER == 0 ~ "No",
+		ALC_EVER == 1 ~ "Yes",
+		ALC_EVER == 2 ~ "No"))
+
+table(data_small$ALC_EVER, data_small$alcohol)
+
+data_small$ALC_EVER <- NULL
+
+```
+### Smoking
+
+```{r}
+table(data_small$SMK_CIG_EVER)
+
+data_small <- data_small %>%
+	mutate(smoking = case_when(
+		SMK_CIG_EVER == 0 ~ "No",
+		SMK_CIG_EVER == 1 ~ "Yes",
+		SMK_CIG_EVER == 2 ~ "No"))
+
+table(data_small$SMK_CIG_EVER, data_small$smoking)
+
+data_small$SMK_CIG_EVER <- NULL
+```
+
+
+### General Health
+
+```{r}
+table(data_small$HS_GEN_HEALTH)
+
+data_small <- data_small %>%
+	mutate(health_recode = case_when(
+		HS_GEN_HEALTH == 1 ~ "1_Excellent",
+		HS_GEN_HEALTH == 2 ~ "1_Excellent",
+		HS_GEN_HEALTH == 3 ~ "2_Very_Good",
+		HS_GEN_HEALTH == 4 ~ "3_Good",
+		HS_GEN_HEALTH == 5 ~ "4_Fair"))
+
+table(data_small$HS_GEN_HEALTH, data_small$health_recode)
+
+data_small$HS_GEN_HEALTH <- NULL
+
+
+```
+
+### Employment
+
+```{r}
+table(data_small$WRK_EMPLOYMENT)
+
+data_small <- data_small %>%
+	mutate(employment_recode = case_when(
+		WRK_EMPLOYMENT == 1 ~ "Employed",
+		WRK_EMPLOYMENT == 0 ~ "Unempyloyed"))
+
+table(data_small$WRK_EMPLOYMENT, data_small$employment_recode)
+
+data_small$WRK_EMPLOYMENT <- NULL
+
+```
+
+### Family history of depression
+
+```{r}
+table(data_small$DIS_DEP_FAM_EVER)
+
+data_small <- data_small %>%
+	mutate(dep_fam_recode = case_when(
+		DIS_DEP_FAM_EVER == 0 ~ "No",
+		DIS_DEP_FAM_EVER == 1 ~ "Yes",
+		DIS_DEP_FAM_EVER == 2 ~ "No"))
+
+table(data_small$DIS_DEP_FAM_EVER, data_small$dep_fam_recode)
+
+data_small$DIS_DEP_FAM_EVER <- NULL
+
+
+```
+
+### Anxiety
+
+```{r}
+table(data_small$DIS_MH_ANXIETY_EVER)
+
+data_small <- data_small %>%
+	mutate(anxiety_recode = case_when(
+		DIS_MH_ANXIETY_EVER == 0 ~ "No",
+		DIS_MH_ANXIETY_EVER == 1 ~ "Yes",
+		DIS_MH_ANXIETY_EVER == 2 ~ "No"))
+
+table(data_small$DIS_MH_ANXIETY_EVER, data_small$anxiety_recode)
+
+data_small$DIS_MH_ANXIETY_EVER <- NULL
+
+
+```
+## 1. Dataset Exploration
+
+### Summary Statistics after cleaning
+
+```{r}
+vars <- c(
+"SDC_AGE_CALC",
+"gender",
+"marital_recode",
+"edu_recode",
+"income",
+"hh_adults",
+"hh_children",
+"diabetes",
+"PM_BMI_SR",
+"alcohol",
+"smoking",
+"health_recode",
+"employment_recode",
+"dep_fam_recode",
+"anxiety_recode",
+"PA_TOTAL_SHORT"
+)
+```
+
+### Table 1: Summary of participant characteristics stratified by depression status
+
+```{r}
+table1 <- CreateTableOne(
+vars = vars,
+strata = "depression",
+data = data_small)
+
+print(table1, showAllLevels = TRUE)
+```
+
+*Interpretation:* Table 1 summarizes participant characteristics stratified by depression status. A total of 41,187 participants were included in the analysis, of whom 5,136 (12.5%) reported depression and 36,051 (87.5%) did not. Individuals with depression were slightly older on average (51.8 ± 10.7 years) compared with those without depression (51.4 ± 10.8 years, p = 0.015). A higher proportion of participants with depression were female (3,868; 75.3%) compared with the non-depressed group (22,119; 61.4%, p < 0.001). Participants with depression were also less likely to be married or living with a partner (65.0% vs. 75.8%) and more likely to report lower household income, particularly incomes below $50,000 (31.0% vs. 22.9%, p < 0.001).
+
+Participants with depression had a higher mean BMI (28.05 vs. 27.60) and a higher prevalence of diabetes (11.2% vs. 7.0%). Smoking was also more common among those with depression (51.4% vs. 45.2%, p < 0.001). In addition, individuals with depression were more likely to report poorer self-rated health, with a larger proportion reporting fair health compared with those without depression. Strong differences were also observed for mental health factors: participants with depression were substantially more likely to report a family history of depression (47.7% vs. 24.5%) and anxiety (35.0% vs. 9.4%) (p < 0.001). In contrast, physical activity levels were similar between groups (p = 0.488).
+
+### Correlations 
+
+```{r}
+data_small %>% 
+  correlate() %>%
+  rearrange() %>%
+  shave()  %>%
+  rplot(print_cor=TRUE) +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+*Interpretation:*  Overall, there are no strong correlations that would suggest multicollinearity issues in the dataset.
+
+
+### Outcome distribution
+
+```{r}
+ggplot(data_small, aes(x = depression)) +
+  geom_bar(fill = "steelblue") +
+  labs(
+    title = "Distribution of Depression Status",
+    x = "Depression Status",
+    y = "Number of Participants"
+  )
+```
+
+*Interpretation:* The bar plot shows that the majority of participants in the dataset have never had depression, while a smaller proportion have experienced depression at some point in their lives. This indicates an imbalance in the outcome variable, which may need to be addressed during model training to ensure that the model does not become biased towards predicting the majority class.
+
+
+### Age distribution by depression status
+
+```{r}
+ggplot(data_small, aes(x = depression, y = SDC_AGE_CALC)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(
+    title = "Age Distribution by Depression Status",
+    x = "Depression Status",
+    y = "Age"
+  )
+```
+
+*Interpretation:* The box plot shows that the age distribution is similar between those who have had depression and those who have not. The median age is around 50 years for both groups, and the interquartile range is also similar. There are some outliers in both groups, but overall, age does not appear to be a strong differentiating factor between those with and without a history of depression in this dataset.
+
+### BMI vs Physical Activity, colored by depression status
+
+```{r}
+ggplot(data_small, aes(x = PM_BMI_SR, y = PA_TOTAL_SHORT, color = depression)) +
+  geom_point(alpha = 0.5) +
+  labs(
+    title = "Relationship Between BMI, Physical Activity, and Depression Status",
+    x = "BMI",
+    y = "Physical Activity",
+    color = "Depression Status"
+  ) +
+  theme_minimal()
+```
+
+*Interpretation:* The scatter plot shows the relationship between BMI, physical activity, and depression status. There is a wide range of BMI and physical activity levels in both groups. However, there does not appear to be a clear pattern or strong relationship between these variables and depression status. Both groups have individuals with low and high BMI, as well as low and high physical activity levels, suggesting that these factors alone may not be strong predictors of depression in this dataset.
+
+
+## 2. Baseline Random Forest Model
+
+To establish a reference point for model performance, I will first train a baseline random forest model using default hyperparameters. This will allow me to evaluate the performance of the model before any tuning and cross-validation, and will provide a benchmark against which I can compare the results of the tuned models.
+
+```{r}
+set.seed(10)
+
+cv_split <- initial_validation_split(data_small, 
+                            strata = depression, 
+                            prop = c(0.70, 0.20))
+
+train_data <- training(cv_split)
+table(train_data$depression)
+
+test_data  <- testing(cv_split)
+table(test_data$depression)
+```
+
+The distribution of the outcome variable (depression) is similar in both sets. 
+
+```{r}
+cores <- parallel::detectCores()
+cores
+```
+
+## Baseline model
+
+```{r}
+rf_baseline <- rand_forest(
+  mtry = 4,
+  min_n = 5,
+  trees = 100
+) %>%
+  set_engine("ranger", num.threads = cores) %>%
+  set_mode("classification")
+```
+
+The baseline random forest model was fitted using fixed hyperparameters (mtry = 4, min_n = 5, and trees = 100). The value of mtry was chosen based on the common rule of thumb for classification random forests, where the number of predictors considered at each split is approximately the square root of the total number of predictors. The value of min_n = 5 was used as a standard setting to prevent overly small node splits and reduce overfitting. 
+
+### Recipe
+
+```{r}
+depression_recipe_baseline <- 
+  recipe(depression ~ ., data = train_data) %>% 
+  step_zv(all_predictors())
+```
+
+### Workflow
+
+```{r}
+depression_workflow_baseline <- 
+        workflow() %>% 
+        add_model(rf_baseline) %>% 
+        add_recipe(depression_recipe_baseline)
+depression_workflow_baseline
+```
+
+### Fit the model
+
+```{r}
+set.seed(100)
+
+baseline_fit <- depression_workflow_baseline %>%
+  last_fit(cv_split)
+```
+
+### Matrics
+
+```{r}
+collect_metrics(baseline_fit)
+
+baseline_pred <- collect_predictions(baseline_fit)
+
+conf_mat(baseline_pred, truth = depression, estimate = .pred_class)
+
+accuracy(baseline_pred, truth = depression, estimate = .pred_class)
+sens(baseline_pred, truth = depression, estimate = .pred_class, event_level = "second")
+spec(baseline_pred, truth = depression, estimate = .pred_class, event_level = "second")
+f_meas(baseline_pred, truth = depression, estimate = .pred_class, event_level = "second")
+roc_auc(baseline_pred, truth = depression, .pred_Yes, event_level = "second")
+
+```
+
+*Interpretation:* The baseline random forest model achieved an accuracy of 0.877 and a ROC-AUC of 0.749, indicating moderate predictive performance. While the model demonstrated very high specificity (0.984) in identifying individuals without depression, it showed low sensitivity (0.142) for detecting depression cases. This suggests that the model is much better at correctly identifying non-depressed individuals than those with depression, which may be a concern given the importance of accurately identifying individuals with depression for potential interventions. The F1 score of 0.23 further indicates that the model's performance in predicting the positive class (depression) is relatively poor. Overall, while the model performs well in terms of overall accuracy, it may not be effective for identifying individuals with depression, and further tuning or alternative modeling approaches may be needed to improve sensitivity.
+
+
+### Forest model object
+
+```{r}
+rf_model <- rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% 
+              set_engine("ranger", num.threads = cores) %>% 
+              set_mode("classification")
+```
+
+### Receipe 
+
+```{r}
+depression_recipe <- 
+  recipe(depression ~ ., data = train_data) %>% 
+  step_zv(all_predictors()) 
+```
+
+
+### Workflow 
+
+```{r}
+depression_workflow <- 
+        workflow() %>% 
+        add_model(rf_model) %>% 
+        add_recipe(depression_recipe)
+
+depression_workflow
+```
+### Fit a model
+
+```{r}
+set.seed(100)
+
+folds <- vfold_cv(train_data, v = 10) 
+
+rf_grid <- grid_regular(
+              mtry(range = c(2, 8)),
+              min_n(range = c(5, 50)),
+              levels = 5  
+            )
+
+rf_grid
+
+
+depression_fit <- tune_grid(
+                depression_workflow,
+                resamples = folds,
+                grid = rf_grid, 
+                control = control_resamples(save_pred = TRUE, 
+                                                  verbose = FALSE))
+
+depression_fit
+```
+
+### Plot of the results 
+
+```{r}
+depression_fit %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+*Interpretation:* The hyperparameter tuning results show that model accuracy varied only slightly across different values of mtry and min_n. The highest accuracy was observed around mtry = 6, while performance remained relatively stable across the tested min_n values. 
+
+```{r}
+depression_fit %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+```
+
+*Interpretation:* The line plot shows that accuracy was highest when mtry was around 6, regardless of the min_n value. This suggests that selecting around 6 predictors at each split may be optimal for this dataset, while the minimum number of observations required to split a node (min_n) does not have a strong impact on accuracy within the tested range.
+
+### Collect the results
+
+```{r}
+rf_best <- 
+  depression_fit %>% 
+  select_best(metric = "accuracy")
+
+rf_best
+
+rf_auc_fit <- 
+  depression_fit %>% 
+  collect_predictions(parameters = rf_best) 
+
+rf_auc_fit
+```
+
+*Interpretation:* The best hyperparameters identified from tuning were mtry = 6 and min_n = 5, which achieved the highest accuracy of 0.876. These parameters will be used to fit the final random forest model and evaluate its performance on the test set.
+
+### Confusion matrix
+
+Using the class predictions, I will create a confusion matrix to evaluate how the model performed across all the classes.
+
+```{r}
+conf_mat(rf_auc_fit, truth = depression,
+         estimate = .pred_class)
+```
+*Interpretation:* The confusion matrix shows that the model correctly classified 24,860 individuals without depression and 499 individuals with depression. However, 3,096 depression cases were incorrectly predicted as non-depressed (false negatives), indicating that the model misses a substantial number of depression cases. Only 375 non-depressed individuals were incorrectly classified as depressed (false positives). 
+
+### Sensitivity 
+
+```{r}
+
+sens(rf_auc_fit, truth = depression,
+         estimate = .pred_class)
+```
+
+*Interpretation:* The model achieved a sensitivity of 0.986 for the “No depression” class, indicating that it correctly identified most individuals without depression.
+
+### Specificity 
+
+```{r}
+spec(rf_auc_fit, truth = depression,
+         estimate = .pred_class)
+```
+
+*Interpretation:* the model achieved a specificity of 0.138 for the “Yes depression” class, indicating that it correctly identified only a small proportion of individuals with depression. This low specificity suggests that the model has difficulty distinguishing between individuals with and without depression, leading to a high number of false positives.
+
+### F1 score
+
+```{r}
+
+f_meas(rf_auc_fit, truth = depression,
+         estimate = .pred_class)
+
+```
+
+*Interpretation:* The model achieved an F1 score of 0.93, indicating strong overall performance for the majority class.
+
+
+## 3. Hyperparameter Tuning Random Forest Model
+
+After training a baseline model using default hyperparameters to establish a reference point for performance, I will now develop and evaluate a random forest model with hyperparameter tuning to assess whether this improves accuracy. The goal is to tune parameters such as the number of predictors randomly sampled at each split (`mtry`), the minimum number of observations required in nodes (`min_n`), and the total number of trees.
+
+### Random Forest with Hyperparameter Tuning
+
+
+```{r}
+
+rf_best <- depression_fit %>%
+  select_best(metric = "accuracy")
+
+
+final_workflow <- depression_workflow %>%
+  finalize_workflow(rf_best)
+
+final_fit <- final_workflow %>%
+  last_fit(cv_split)
+
+final_fit
+```
+
+### Final Tunned Model
+
+```{r}
+final_model <- finalize_model(
+                  rf_model,
+                  rf_best
+                )
+
+final_model
+```
+
+### Collecting metrics and predictions from the final model
+
+```{r}
+collect_metrics(final_fit)
+
+final_pred <- collect_predictions(final_fit)
+
+conf_mat(final_pred, truth = depression, estimate = .pred_class)
+
+accuracy(final_pred, truth = depression, estimate = .pred_class)
+sens(final_pred, truth = depression, estimate = .pred_class, event_level = "second")
+spec(final_pred, truth = depression, estimate = .pred_class, event_level = "second")
+f_meas(final_pred, truth = depression, estimate = .pred_class, event_level = "second")
+roc_auc(final_pred, truth = depression, .pred_Yes, event_level = "second")
+```
+
+*Interpretation: * The tuned random forest model achieved an accuracy of 0.876 and ROC-AUC of 0.739, indicating moderate predictive performance. While the model demonstrated high specificity (0.980) in identifying individuals without depression, its sensitivity was low (0.162), meaning that many depression cases were misclassified as non-depressed.
+
+
+## 4. Model Comparisons
+
+I will now compare the performance of the baseline random forest model and the final tuned model.This comparison will help determine whether hyperparameter tuning has led to a significant improvement in model performance.
+
+```{r}
+baseline_metrics <- collect_metrics(baseline_fit) %>%
+  mutate(model = "Baseline RF")
+
+tuned_metrics <- collect_metrics(final_fit) %>%
+  mutate(model = "Tuned RF")
+
+comparison_table <- bind_rows(baseline_metrics, tuned_metrics) 
+
+comparison_table
+```
+
+*Interpretation:* The baseline random forest model performed similarly to the tuned model across all evaluation metrics. The baseline model achieved slightly higher accuracy (0.877 vs. 0.876) and ROC-AUC (0.749 vs. 0.739) and a slightly lower Brier score (0.097 vs. 0.099). Overall, hyperparameter tuning did not meaningfully improve model performance, suggesting that the default baseline configuration already captured most of the predictive signal in the data.
+
+## 5. Feature Importance Analysis
+
+```{r}
+tree_prep <- prep(depression_recipe)
+
+final_model %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(depression ~ .,
+    data = juice(tree_prep)) %>%
+  vip(geom = "point")
+```
+
+*Interpretation:* The feature importance analysis indicates that anxiety status (anxiety_recode) was the most influential predictor of depression in the random forest model. This variable had the highest importance score, suggesting that individuals reporting anxiety were much more likely to be classified as having depression.
+
+Other important predictors included age (SDC_AGE_CALC), self-rated health (health_recode), and family history of depression (dep_fam_recode), all of which showed relatively high importance scores. 
+
+Moderately important variables included marital status (marital_recode),gender and, household composition (hh_adults, hh_children).
+
+In contrast, variables such as income, physical activity (PA_TOTAL_SHORT) had lower importance scores, suggesting they contributed less to the predictive performance of the model.
+
